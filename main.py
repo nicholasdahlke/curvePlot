@@ -1,21 +1,57 @@
+import numpy
 import numpy as np
 import matplotlib.pyplot as plt
+import ray
 import csv
 import scipy
 
+############################### Constants ###############################
+c1 = 0.643942 /1000 #
+c2 = 0.654876 /1000 # Kennwerte der Kanäle des Kraftsensors
+c3 = 0.677194 /1000 #
+
+amplifier_sensitivity = 0.5 / 1000 # mv/V
+amplifier_output_min_max = 10 # V Output Range of the amplifier
+u_speise = 5  # Speisespannung des Kraftsensors - 5V
+f_nom = 20  # Nennkraft 20N
+
+chord_length = 0.0493  # Chordlength des Flügels
+wing_span = 0.15  # Flügelspanne
+surface_area = chord_length * wing_span  # Fläche des Flügels
+air_density = 1.225  # Luftdichte
+flow_speed = 10  # Freistromgeschwindigkeit
+
+angle_filter_length = 10  # Fensterbreite des Moving Median Winkel
+force_filter_length = 15000  # Fensterbreite des Moving Average Kräfte
+
+############################### Convert the LabVIEW Waveform Timestamps into a usable Format ###########################
+def convert_timestamp(timestamp):
+    print("Convert timestamp " + timestamp)
+    timestamp = timestamp[11:len(timestamp)].strip()
+    hours = int(timestamp[0:2]) * 3600
+    minutes = int(timestamp[3:5]) * 60
+    seconds = float(timestamp[6:len(timestamp)].replace(",", "."))
+    print(hours + minutes + seconds)
+    return float(hours + minutes + seconds)
+
+convert_timestamp_vec = np.vectorize(convert_timestamp, otypes=[float])
+
+
+########################################################################################################################
+############################### Data Input Functions ###############################
 def read_angle_data(filename):
     data = []
     with open(filename, 'r') as file:
         reader = csv.reader(file, delimiter=";")
         for row in reader:
             if row[0] != "":
-                row[0] = convert_timestamp(row[0])
                 row[1] = float(row[1].replace(",", "."))
                 data.append(row)
-
+    data_np = np.array(data)
+    data_np[:,0] = convert_timestamp_vec(data_np[:,0])
     print("Read angle data of length")
     print(len(data))
-    return np.array(data)
+    return data_np.astype(float)
 
 
 def read_force_data(filename):
@@ -24,65 +60,110 @@ def read_force_data(filename):
         reader = csv.reader(file, delimiter=";")
         for row in reader:
             if row[0] != "":
-                row[0] = convert_timestamp(row[0])
                 row[1] = float(row[1].replace(",", "."))
                 row[2] = float(row[2].replace(",", "."))
                 row[3] = float(row[3].replace(",", "."))
-
                 data.append(row)
+    data_np = np.array(data)
+    data_np[:,0] = convert_timestamp_vec(data_np[:,0])
     print("Read force data of length")
+    print(len(data))
+    return data_np.astype(float)
+
+
+def read_sim_data(filename):
+    data = []
+    with open(filename, 'r') as file:
+        reader = csv.reader(file, delimiter=',')
+        for row in reader:
+            for i in range(7):
+                row[i] = float(row[i])
+            data.append(row)
+    print("Read simulation data of length")
     print(len(data))
     return np.array(data)
 
 
-def convert_timestamp(timestamp):
-    print("Convert timestamp " + timestamp)
-    timestamp = timestamp[11:len(timestamp)]
-    hours = int(timestamp[0:2]) * 3600
-    minutes = int(timestamp[3:5]) * 60
-    seconds = float(timestamp[6:len(timestamp)].replace(",", "."))
-    print(hours + minutes + seconds)
-    return hours + minutes + seconds
+#####################################################################################
 
 
 def sync_merge_data(angles, forces):
-    data = []
-    for i, angle in enumerate(angles):
-        timestamp_angles = angle[0]
-        force1 = np.interp(timestamp_angles, forces[:, 0], forces[:, 1], left=np.nan, right=np.nan)
-        force2 = np.interp(timestamp_angles, forces[:, 0], forces[:, 2], left=np.nan, right=np.nan)
-        force3 = np.interp(timestamp_angles, forces[:, 0], forces[:, 3], left=np.nan, right=np.nan)
-        data.append([timestamp_angles, angle[1], force1, force2, force3])
-        print("Synced data point " + str(i))
-    return np.array(data)
+    start_index = 0
+    for i, force in enumerate(forces):
+        if force[0] >= angles[0][0]:
+            start_index = i + 3 # set index offset here, to skip wrong data
+            break
 
-#angles = read_angle_data("angle.csv")
-#forces = read_force_data("forces.csv")
+    forces = forces[start_index:-1] # set end offset here
+    angles_interp = np.interp(forces[:, 0], angles[:, 0], angles[:, 1], left=np.nan, right=np.nan)
+    return numpy.column_stack((forces[:, 0], angles_interp, forces[:, 1], forces[:, 2], forces[:, 3]))
+
+
+def convert_voltage_to_force(u, f_kenn, c, u_speise, amplifier_sensitivity, amplifier_output_min_max):
+    voltage = ((amplifier_sensitivity/u_speise)/amplifier_output_min_max) * u
+    return voltage * u_speise * c * f_kenn
+
+
+def calculate_lift_coefficient(lift_force, fluid_density, flow_speed, surface_area):
+    dynamic_pressure = (fluid_density/2)*flow_speed**2
+    return lift_force / (dynamic_pressure * surface_area)
+
+
+def calculate_drag_coefficient(drag_force, fluid_density, flow_speed, surface_area):
+    return (2*drag_force)/(fluid_density * flow_speed**2 *surface_area)
+
+
+convert_voltage_to_force_vec = np.vectorize(convert_voltage_to_force)
+calculate_lift_coefficient_vec = np.vectorize(calculate_lift_coefficient)
+calculate_drag_coefficient_vec = np.vectorize(calculate_drag_coefficient)
+
+#angles = read_angle_data("Real/NACA 0018/10ms/serial.csv")
+#forces = read_force_data("Real/NACA 0018/10ms/daq.csv")
 
 #merged = sync_merge_data(angles, forces)
 #np.save("save.npy", merged)
 
 merged = np.load("save.npy", allow_pickle=True)
 
-force_filter_length = 1000
-u1_smooth = np.convolve(merged[:, 2], np.ones(force_filter_length) / force_filter_length, mode="same")
-u2_smooth = np.convolve(merged[:, 3], np.ones(force_filter_length) / force_filter_length, mode="same")
-u3_smooth = np.convolve(merged[:, 4], np.ones(force_filter_length) / force_filter_length, mode="same")
+f1 = convert_voltage_to_force_vec(merged[:, 2], f_nom, c1, u_speise, amplifier_sensitivity, amplifier_output_min_max)
+f2 = convert_voltage_to_force_vec(merged[:, 3], f_nom, c2, u_speise, amplifier_sensitivity, amplifier_output_min_max)
+f3 = convert_voltage_to_force_vec(merged[:, 4], f_nom, c3, u_speise, amplifier_sensitivity, amplifier_output_min_max)
 
+f1_smooth = np.convolve(merged[:, 2], np.ones(force_filter_length) / force_filter_length, mode="same")
+f2_smooth = np.convolve(merged[:, 3], np.ones(force_filter_length) / force_filter_length, mode="same")
+f3_smooth = np.convolve(merged[:, 4], np.ones(force_filter_length) / force_filter_length, mode="same")
 
+drag_force = f3_smooth + abs(f3_smooth.min())
 
-angle_filter_length = 10
-angle_smooth = scipy.ndimage.median_filter(merged[:,1], angle_filter_length, mode='reflect')
+lift_coefficient = calculate_lift_coefficient_vec(f1_smooth, air_density, flow_speed, surface_area)
+drag_coefficient = calculate_drag_coefficient_vec(drag_force, air_density, flow_speed, surface_area)
 
+angle_smooth = scipy.ndimage.median_filter(merged[:, 1], angle_filter_length, mode='reflect')
+
+sim_data = read_sim_data("Real/NACA 0018/xf-naca0018-il-200000.csv.csv")
 
 fig, ax1 = plt.subplots()
-ax1.plot(merged[:, 0], u1_smooth, label="$U_1$")
-ax1.plot(merged[:, 0], u2_smooth, label="$U_2$")
-ax1.plot(merged[:, 0], u3_smooth, label="$U_3$")
+#f1_plot = ax1.plot(angle_smooth, f1_smooth, label="$F_1$")
+#f2_plot = ax1.plot(angle_smooth, f2_smooth, label="$F_2$")
+#f3_plot = ax1.plot(angle_smooth, f3_smooth, label="$F_3$")
+drag_plot = ax1.plot(angle_smooth, drag_coefficient, label="$C_D$", color="blue")
+drag_sim_plot = ax1.plot(sim_data[:,0], sim_data[:,2], label="XFoil $C_D$", linestyle="--", color="blue")
+
+
 
 ax2 = ax1.twinx()
-ax2.plot(merged[:, 0], angle_smooth,  label=r"$\alpha$")
+lift_sim_plot = ax2.plot(sim_data[:, 0], sim_data[:, 1], label="XFoil $C_L$", linestyle="--", color="orange")
+lift_plot = ax2.plot(angle_smooth, lift_coefficient, label="$C_L$", color="orange")
 
-# plt.ylim([-25, 25])
-fig.legend()
+ax2.set_ylabel("$C_L$")
+ax1.set_ylabel(r"$C_D$")
+
+leg = drag_plot + lift_plot + drag_sim_plot + lift_sim_plot
+legs = [l.get_label() for l in leg]
+ax1.legend(leg, legs, loc="upper left")
+
+plt.xlabel(r"$\alpha$ in $^{\circ}$")
+plt.title("NACA 0018")
+plt.xlim((-20,20))
+
 plt.show()
