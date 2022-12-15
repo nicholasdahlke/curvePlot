@@ -1,7 +1,9 @@
+import time
+
 import numpy
 import numpy as np
 import matplotlib.pyplot as plt
-import ray
+import subprocess as sp
 import csv
 import scipy
 
@@ -22,8 +24,15 @@ air_density = 1.225  # Luftdichte
 flow_speed = 10  # Freistromgeschwindigkeit
 
 angle_filter_length = 10  # Fensterbreite des Moving Median Winkel
-force_filter_length = 15000  # Fensterbreite des Moving Average Kräfte
+force_filter_length =  10000 # Fensterbreite des Moving Average Kräfte
 
+naca = "0018"
+re = 33000
+ncrit = 5
+iter = 5000
+
+sweep_sim_angle = 20
+sweep_sim_step = 0.5
 ############################### Convert the LabVIEW Waveform Timestamps into a usable Format ###########################
 def convert_timestamp(timestamp):
     print("Convert timestamp " + timestamp)
@@ -38,6 +47,7 @@ convert_timestamp_vec = np.vectorize(convert_timestamp, otypes=[float])
 
 
 ########################################################################################################################
+
 ############################### Data Input Functions ###############################
 def read_angle_data(filename):
     data = []
@@ -74,9 +84,9 @@ def read_force_data(filename):
 def read_sim_data(filename):
     data = []
     with open(filename, 'r') as file:
-        reader = csv.reader(file, delimiter=',')
+        reader = csv.reader(file, delimiter=';')
         for row in reader:
-            for i in range(7):
+            for i in range(9):
                 row[i] = float(row[i])
             data.append(row)
     print("Read simulation data of length")
@@ -86,24 +96,62 @@ def read_sim_data(filename):
 
 #####################################################################################
 
+#####################################################################################
+# Use XFoil to generate a reference polar
+xfoil_save_file = "xfoil_naca" + naca + "re" + str(re) + "ncrit" + str(ncrit) + ".dat" # File, which the polar is saved to
 
+xfoil_inp = "NACA " + naca + "\n"
+xfoil_inp += "GDES\n"
+xfoil_inp += "\n"
+xfoil_inp += "OPER\n"
+xfoil_inp += "VPAR\n"
+xfoil_inp += "N\n"
+xfoil_inp += str(ncrit) + "\n"
+xfoil_inp += "\n"
+xfoil_inp += "RE\n"
+xfoil_inp += str(re) + "\n"
+xfoil_inp += "ITER\n"
+xfoil_inp += str(iter) + "\n"
+xfoil_inp += "VISC\n"
+xfoil_inp += "PACC\n"
+xfoil_inp += xfoil_save_file + "\n"
+xfoil_inp += "\n"
+xfoil_inp += "ASEQ " + str(-sweep_sim_angle) + " " + str(sweep_sim_angle) + " " + str(sweep_sim_step) + "\n"
+xfoil_inp += "\n"
+xfoil_inp += "QUIT"
+print(xfoil_inp)
+xfoil_inp = xfoil_inp.encode('ascii') #
+
+xfoil_p = sp.Popen(["xfoil"], stdout=sp.PIPE, stdin=sp.PIPE, stderr=sp.PIPE) # open an XFoil subprocess
+xfoil_out = xfoil_p.communicate(input=xfoil_inp) # send xfoil_inp via stdin
+
+clean_p = sp.Popen(["/home/nicholas/PycharmProjects/curvePlot/clean_sim_file.sh", xfoil_save_file.encode('ascii')]) # cleanup the results for use with numpy
+#####################################################################################
+
+
+#####################################################################################
+# Sync the force and angle data using the timestamps
 def sync_merge_data(angles, forces):
     start_index = 0
     for i, force in enumerate(forces):
         if force[0] >= angles[0][0]:
-            start_index = i + 3 # set index offset here, to skip wrong data
+            start_index = i + 0 # set index offset here, to skip wrong data
             break
 
     forces = forces[start_index:-1] # set end offset here
     angles_interp = np.interp(forces[:, 0], angles[:, 0], angles[:, 1], left=np.nan, right=np.nan)
     return numpy.column_stack((forces[:, 0], angles_interp, forces[:, 1], forces[:, 2], forces[:, 3]))
+#####################################################################################
 
-
+#####################################################################################
+# Convert the voltage signal from the sensor to a force signal
 def convert_voltage_to_force(u, f_kenn, c, u_speise, amplifier_sensitivity, amplifier_output_min_max):
     voltage = ((amplifier_sensitivity/u_speise)/amplifier_output_min_max) * u
     return voltage * u_speise * c * f_kenn
+#####################################################################################
 
-
+#####################################################################################
+# Calculate Lift and Drag Coefficient
 def calculate_lift_coefficient(lift_force, fluid_density, flow_speed, surface_area):
     dynamic_pressure = (fluid_density/2)*flow_speed**2
     return lift_force / (dynamic_pressure * surface_area)
@@ -112,58 +160,125 @@ def calculate_lift_coefficient(lift_force, fluid_density, flow_speed, surface_ar
 def calculate_drag_coefficient(drag_force, fluid_density, flow_speed, surface_area):
     return (2*drag_force)/(fluid_density * flow_speed**2 *surface_area)
 
+#####################################################################################
 
+#####################################################################################
+# Create vectorized functions numpy can use efficiently
 convert_voltage_to_force_vec = np.vectorize(convert_voltage_to_force)
 calculate_lift_coefficient_vec = np.vectorize(calculate_lift_coefficient)
 calculate_drag_coefficient_vec = np.vectorize(calculate_drag_coefficient)
+#####################################################################################
 
-#angles = read_angle_data("Real/NACA 0018/10ms/serial.csv")
-#forces = read_force_data("Real/NACA 0018/10ms/daq.csv")
+#####################################################################################
+# Read the data into numpy arrays
+angles = read_angle_data("Real/NACA 0018/4_10/serial.csv")
+forces = read_force_data("Real/NACA 0018/4_10/daq.csv")
+#####################################################################################
 
-#merged = sync_merge_data(angles, forces)
-#np.save("save.npy", merged)
+#####################################################################################
+# Merge angle and force data and save them to a file
+merged = sync_merge_data(angles, forces)
+np.save("save.npy", merged)
+#####################################################################################
 
+#####################################################################################
+#Allow quick reloading of the data
 merged = np.load("save.npy", allow_pickle=True)
+#####################################################################################
 
+
+#####################################################################################
+# Convert all the voltages to forces
 f1 = convert_voltage_to_force_vec(merged[:, 2], f_nom, c1, u_speise, amplifier_sensitivity, amplifier_output_min_max)
 f2 = convert_voltage_to_force_vec(merged[:, 3], f_nom, c2, u_speise, amplifier_sensitivity, amplifier_output_min_max)
 f3 = convert_voltage_to_force_vec(merged[:, 4], f_nom, c3, u_speise, amplifier_sensitivity, amplifier_output_min_max)
+#####################################################################################
 
+#####################################################################################
+# Smooth the signals using a moving average filter with the window size force_filter_length
 f1_smooth = np.convolve(merged[:, 2], np.ones(force_filter_length) / force_filter_length, mode="same")
 f2_smooth = np.convolve(merged[:, 3], np.ones(force_filter_length) / force_filter_length, mode="same")
 f3_smooth = np.convolve(merged[:, 4], np.ones(force_filter_length) / force_filter_length, mode="same")
+#####################################################################################
 
-drag_force = f3_smooth + abs(f3_smooth.min())
+#####################################################################################
+# For clearer naming
+lift_force = f1_smooth
+drag_force = f3_smooth
+#####################################################################################
 
+#####################################################################################
+# Calculate lift and drag coefficients
 lift_coefficient = calculate_lift_coefficient_vec(f1_smooth, air_density, flow_speed, surface_area)
 drag_coefficient = calculate_drag_coefficient_vec(drag_force, air_density, flow_speed, surface_area)
+#####################################################################################
 
+#####################################################################################
+# Smooth the angle data using a moving median to remove outliers
 angle_smooth = scipy.ndimage.median_filter(merged[:, 1], angle_filter_length, mode='reflect')
+#####################################################################################
 
-sim_data = read_sim_data("Real/NACA 0018/xf-naca0018-il-200000.csv.csv")
+#####################################################################################
+# Read in the simulated data
+sim_data = read_sim_data(xfoil_save_file + ".csv")
+#####################################################################################
 
-fig, ax1 = plt.subplots()
-#f1_plot = ax1.plot(angle_smooth, f1_smooth, label="$F_1$")
-#f2_plot = ax1.plot(angle_smooth, f2_smooth, label="$F_2$")
-#f3_plot = ax1.plot(angle_smooth, f3_smooth, label="$F_3$")
-drag_plot = ax1.plot(angle_smooth, drag_coefficient, label="$C_D$", color="blue")
-drag_sim_plot = ax1.plot(sim_data[:,0], sim_data[:,2], label="XFoil $C_D$", linestyle="--", color="blue")
+#####################################################################################
+# Calculate C_L/C_D
+lift_div_drag = lift_coefficient/drag_coefficient
+sim_lift_div_drag = sim_data[:,1] / sim_data[:,2]
+#####################################################################################
 
+#####################################################################################
+# Create a 2x2 Grid of subplots
+fig, axs = plt.subplots(2,2)
+#####################################################################################
 
+#####################################################################################
+# Plot all the smoothed force signals
+f1_plot = axs[0,0].plot(angle_smooth, f1_smooth, label="$F_1$")
+f2_plot = axs[0,0].plot(angle_smooth, f2_smooth, label="$F_2$")
+f3_plot = axs[0,0].plot(angle_smooth, f3_smooth, label="$F_3$")
+axs[0,0].set_ylabel("$F$")
+axs[0,0].set_title(r"$F$ vs $\alpha$")
+axs[0,0].legend()
+#####################################################################################
 
-ax2 = ax1.twinx()
-lift_sim_plot = ax2.plot(sim_data[:, 0], sim_data[:, 1], label="XFoil $C_L$", linestyle="--", color="orange")
-lift_plot = ax2.plot(angle_smooth, lift_coefficient, label="$C_L$", color="orange")
+#####################################################################################
+# Plot measured and simulated drag coefficient
+drag_plot = axs[0,1].plot(angle_smooth, drag_coefficient, label="$C_D$", color="blue")
+drag_sim_plot = axs[0,1].plot(sim_data[:,0], sim_data[:,2], label="XFoil $C_D$", linestyle="--", color="blue")
+axs[0,1].set_ylabel("$C_D$")
+axs[0,1].set_title(r"$C_D$ vs $\alpha$")
+axs[0,1].legend()
+#####################################################################################
 
-ax2.set_ylabel("$C_L$")
-ax1.set_ylabel(r"$C_D$")
+#####################################################################################
+# Plot measured and simulated lift coefficient
+lift_plot = axs[1,0].plot(angle_smooth, lift_coefficient, label="$C_L$", color="orange")
+lift_sim_plot = axs[1,0].plot(sim_data[:, 0], sim_data[:, 1], label="XFoil $C_L$", linestyle="--", color="orange")
+axs[1,0].set_ylabel("$C_L$")
+axs[1,0].set_title(r"$C_L$ vs $\alpha$")
+axs[1,0].legend()
+#####################################################################################
 
-leg = drag_plot + lift_plot + drag_sim_plot + lift_sim_plot
-legs = [l.get_label() for l in leg]
-ax1.legend(leg, legs, loc="upper left")
+#####################################################################################
+# Plot simulated and measured C_L/C_D
+cl_cd_plot = axs[1,1].plot(angle_smooth, lift_div_drag, label=r"$\frac{C_L}{C_D}$", color="c")
+cl_cd_sim_plot = axs[1,1].plot(sim_data[:,0], sim_lift_div_drag, label=r"XFoil $\frac{C_L}{C_D}$", linestyle="--", color="c")
+axs[1,1].set_title(r"$\frac{C_L}{C_D}$ vs $\alpha$")
+axs[1,1].legend()
+#####################################################################################
 
-plt.xlabel(r"$\alpha$ in $^{\circ}$")
-plt.title("NACA 0018")
-plt.xlim((-20,20))
+#####################################################################################
+# Set the correct x-axis limits for all plots
+for ax in axs.flat:
+    ax.set(xlabel=r"$\alpha$", xlim=(-20,20))
+#####################################################################################
 
+#####################################################################################
+# Give the plots the correct title
+fig.suptitle(r"NACA 0018 at $10 \frac{m}{s}$")
 plt.show()
+
+#####################################################################################
