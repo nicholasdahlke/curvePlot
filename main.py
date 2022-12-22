@@ -1,6 +1,3 @@
-import time
-
-import numpy
 import numpy as np
 import matplotlib.pyplot as plt
 import subprocess as sp
