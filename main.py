@@ -5,9 +5,9 @@ import csv
 import scipy
 
 ############################### Constants ###############################
-c1 = 0.643942 /1000 #
-c2 = 0.654876 /1000 # Kennwerte der Kanäle des Kraftsensors
-c3 = 0.677194 /1000 #
+c1 = 0.643942 / 1000 #
+c2 = 0.654876 / 1000 # Kennwerte der Kanäle des Kraftsensors
+c3 = 0.677194 / 1000 #
 
 amplifier_sensitivity = 0.5 / 1000 # mv/V
 amplifier_output_min_max = 10 # V Output Range of the amplifier
@@ -30,6 +30,8 @@ iter = 5000
 
 sweep_sim_angle = 20
 sweep_sim_step = 0.5
+
+use_zero_signal = True
 ############################### Convert the LabVIEW Waveform Timestamps into a usable Format ###########################
 def convert_timestamp(timestamp):
     print("Convert timestamp " + timestamp)
@@ -79,6 +81,7 @@ def read_force_data(filename):
 
 
 def read_sim_data(filename):
+
     data = []
     with open(filename, 'r') as file:
         reader = csv.reader(file, delimiter=';')
@@ -95,34 +98,36 @@ def read_sim_data(filename):
 
 #####################################################################################
 # Use XFoil to generate a reference polar
-xfoil_save_file = "xfoil_naca" + naca + "re" + str(re) + "ncrit" + str(ncrit) + ".dat" # File, which the polar is saved to
+def gen_xfoil_data():
+    xfoil_save_file = "xfoil_naca" + naca + "re" + str(re) + "ncrit" + str(ncrit) + ".dat" # File, which the polar is saved to
 
-xfoil_inp = "NACA " + naca + "\n"
-xfoil_inp += "GDES\n"
-xfoil_inp += "\n"
-xfoil_inp += "OPER\n"
-xfoil_inp += "VPAR\n"
-xfoil_inp += "N\n"
-xfoil_inp += str(ncrit) + "\n"
-xfoil_inp += "\n"
-xfoil_inp += "RE\n"
-xfoil_inp += str(re) + "\n"
-xfoil_inp += "ITER\n"
-xfoil_inp += str(iter) + "\n"
-xfoil_inp += "VISC\n"
-xfoil_inp += "PACC\n"
-xfoil_inp += xfoil_save_file + "\n"
-xfoil_inp += "\n"
-xfoil_inp += "ASEQ " + str(-sweep_sim_angle) + " " + str(sweep_sim_angle) + " " + str(sweep_sim_step) + "\n"
-xfoil_inp += "\n"
-xfoil_inp += "QUIT"
-print(xfoil_inp)
-xfoil_inp = xfoil_inp.encode('ascii') #
+    xfoil_inp = "NACA " + naca + "\n"
+    xfoil_inp += "GDES\n"
+    xfoil_inp += "\n"
+    xfoil_inp += "OPER\n"
+    xfoil_inp += "VPAR\n"
+    xfoil_inp += "N\n"
+    xfoil_inp += str(ncrit) + "\n"
+    xfoil_inp += "\n"
+    xfoil_inp += "RE\n"
+    xfoil_inp += str(re) + "\n"
+    xfoil_inp += "ITER\n"
+    xfoil_inp += str(iter) + "\n"
+    xfoil_inp += "VISC\n"
+    xfoil_inp += "PACC\n"
+    xfoil_inp += xfoil_save_file + "\n"
+    xfoil_inp += "\n"
+    xfoil_inp += "ASEQ " + str(-sweep_sim_angle) + " " + str(sweep_sim_angle) + " " + str(sweep_sim_step) + "\n"
+    xfoil_inp += "\n"
+    xfoil_inp += "QUIT"
+    print(xfoil_inp)
+    xfoil_inp = xfoil_inp.encode('ascii') #
 
-xfoil_p = sp.Popen(["xfoil"], stdout=sp.PIPE, stdin=sp.PIPE, stderr=sp.PIPE) # open an XFoil subprocess
-xfoil_out = xfoil_p.communicate(input=xfoil_inp) # send xfoil_inp via stdin
+    xfoil_p = sp.Popen(["xfoil"], stdout=sp.PIPE, stdin=sp.PIPE, stderr=sp.PIPE) # open an XFoil subprocess
+    xfoil_out = xfoil_p.communicate(input=xfoil_inp) # send xfoil_inp via stdin
 
-clean_p = sp.Popen(["/home/nicholas/PycharmProjects/curvePlot/clean_sim_file.sh", xfoil_save_file.encode('ascii')]) # cleanup the results for use with numpy
+    clean_p = sp.Popen(["/home/nicholas/PycharmProjects/curvePlot/clean_sim_file.sh", xfoil_save_file.encode('ascii')]) # cleanup the results for use with numpy
+    return xfoil_save_file + ".csv"
 #####################################################################################
 
 
@@ -137,14 +142,14 @@ def sync_merge_data(angles, forces):
 
     forces = forces[start_index:-1] # set end offset here
     angles_interp = np.interp(forces[:, 0], angles[:, 0], angles[:, 1], left=np.nan, right=np.nan)
-    return numpy.column_stack((forces[:, 0], angles_interp, forces[:, 1], forces[:, 2], forces[:, 3]))
+    return np.column_stack((forces[:, 0], angles_interp, forces[:, 1], forces[:, 2], forces[:, 3]))
 #####################################################################################
 
 #####################################################################################
 # Convert the voltage signal from the sensor to a force signal
-def convert_voltage_to_force(u, f_kenn, c, u_speise, amplifier_sensitivity, amplifier_output_min_max):
-    voltage = ((amplifier_sensitivity/u_speise)/amplifier_output_min_max) * u
-    return voltage * u_speise * c * f_kenn
+def convert_voltage_to_force(u, f_kenn, c, u_speise, amplifier_sensitivity):
+    voltage = (u_speise / amplifier_sensitivity) * u
+    return voltage * u_speise * c / f_kenn
 #####################################################################################
 
 #####################################################################################
@@ -167,9 +172,13 @@ calculate_drag_coefficient_vec = np.vectorize(calculate_drag_coefficient)
 #####################################################################################
 
 #####################################################################################
-# Read the data into numpy arrays
-angles = read_angle_data("Real/NACA 0018/4_10/serial.csv")
-forces = read_force_data("Real/NACA 0018/4_10/daq.csv")
+# Read the angle and force data into numpy arrays
+angles = read_angle_data("Real/NACA 0018/5_10ms/serial.csv")
+forces = read_force_data("Real/NACA 0018/5_10ms/daq.csv")
+
+if use_zero_signal:
+    print("Using zero signal")
+    zero = read_force_data("Real/NACA 0018/5_10ms/zero_signal/daq.csv")
 #####################################################################################
 
 #####################################################################################
@@ -186,16 +195,50 @@ merged = np.load("save.npy", allow_pickle=True)
 
 #####################################################################################
 # Convert all the voltages to forces
-f1 = convert_voltage_to_force_vec(merged[:, 2], f_nom, c1, u_speise, amplifier_sensitivity, amplifier_output_min_max)
-f2 = convert_voltage_to_force_vec(merged[:, 3], f_nom, c2, u_speise, amplifier_sensitivity, amplifier_output_min_max)
-f3 = convert_voltage_to_force_vec(merged[:, 4], f_nom, c3, u_speise, amplifier_sensitivity, amplifier_output_min_max)
+f1 = convert_voltage_to_force_vec(merged[:, 2], f_nom, c1, u_speise, amplifier_sensitivity)
+print("f1 converted")
+
+f2 = convert_voltage_to_force_vec(merged[:, 3], f_nom, c2, u_speise, amplifier_sensitivity)
+print("f2 converted")
+
+f3 = convert_voltage_to_force_vec(merged[:, 4], f_nom, c3, u_speise, amplifier_sensitivity)
+print("f3 converted")
+
+if use_zero_signal:
+    f1_zero = convert_voltage_to_force_vec(zero[:, 1], f_nom, c1, u_speise, amplifier_sensitivity)
+    print("f1 zero converted")
+
+    f2_zero = convert_voltage_to_force_vec(zero[:, 2], f_nom, c2, u_speise, amplifier_sensitivity)
+    print("f2 zero converted")
+
+    f3_zero = convert_voltage_to_force_vec(zero[:, 3], f_nom, c3, u_speise, amplifier_sensitivity)
+    print("f3 zero converted")
 #####################################################################################
 
 #####################################################################################
+# Calculate the zero signal on all three axes
+f1_offset = np.average(f1_zero)
+f2_offset = np.average(f2_zero)
+f3_offset = np.average(f3_zero)
+
+print("f1 offset: ", f1_offset)
+print("f2 offset: ", f2_offset)
+print("f3 offset: ", f3_offset)
+#####################################################################################
+
+#####################################################################################
+# Apply the offset correction to all three channels
+f1 -= f1_offset
+f2 -= f2_offset
+f3 -= f3_offset
+#####################################################################################
+
+
+#####################################################################################
 # Smooth the signals using a moving average filter with the window size force_filter_length
-f1_smooth = np.convolve(merged[:, 2], np.ones(force_filter_length) / force_filter_length, mode="same")
-f2_smooth = np.convolve(merged[:, 3], np.ones(force_filter_length) / force_filter_length, mode="same")
-f3_smooth = np.convolve(merged[:, 4], np.ones(force_filter_length) / force_filter_length, mode="same")
+f1_smooth = np.convolve(f1, np.ones(force_filter_length) / force_filter_length, mode="same")
+f2_smooth = np.convolve(f2, np.ones(force_filter_length) / force_filter_length, mode="same")
+f3_smooth = np.convolve(f3, np.ones(force_filter_length) / force_filter_length, mode="same")
 #####################################################################################
 
 #####################################################################################
@@ -206,7 +249,10 @@ drag_force = f3_smooth
 
 #####################################################################################
 # Calculate lift and drag coefficients
-lift_coefficient = calculate_lift_coefficient_vec(f1_smooth, air_density, flow_speed, surface_area)
+lift_coefficient = calculate_lift_coefficient_vec(lift_force, air_density, flow_speed, surface_area)
+#diff = lift_coefficient.max() + lift_coefficient.min()  #
+#lift_coefficient = lift_coefficient - diff / 2          # Shift the lift curve if necessary
+
 drag_coefficient = calculate_drag_coefficient_vec(drag_force, air_density, flow_speed, surface_area)
 #####################################################################################
 
@@ -217,7 +263,8 @@ angle_smooth = scipy.ndimage.median_filter(merged[:, 1], angle_filter_length, mo
 
 #####################################################################################
 # Read in the simulated data
-sim_data = read_sim_data(xfoil_save_file + ".csv")
+xfoil_save_file = gen_xfoil_data()
+sim_data = read_sim_data(xfoil_save_file)
 #####################################################################################
 
 #####################################################################################
