@@ -4,6 +4,13 @@ import subprocess as sp
 import csv
 import scipy
 
+plt.rcParams.update({
+    "font.family": "serif",
+    "text.usetex": True,
+    "pgf.rcfonts": False,
+    "font.size": 10
+})
+
 ############################### Constants ###############################
 c1 = 0.643942 / 1000 #
 c2 = 0.654876 / 1000 # Kennwerte der Kanäle des Kraftsensors
@@ -17,34 +24,37 @@ f_nom = 20  # Nennkraft 20N
 chord_length = 0.0493  # Chordlength des Flügels
 wing_span = 0.15  # Flügelspanne
 surface_area = chord_length * wing_span  # Fläche des Flügels
-air_density = 1.225  # Luftdichte
+air_density = 1.293  # Luftdichte
+kinematic_viscosity_air = 1.5111E-5 # kinematische Viskosität
 flow_speed = 10  # Freistromgeschwindigkeit
 
-angle_filter_length = 10  # Fensterbreite des Moving Median Winkel
-force_filter_length =  10000 # Fensterbreite des Moving Average Kräfte
+angle_filter_length = 500  # Fensterbreite des Moving Median Winkel
+force_filter_length =  15000 # Fensterbreite des Moving Average Kräfte
+
+axis_diameter = 0.005
+axis_length = 0.15
 
 naca = "0018"
-re = 33000
-ncrit = 5
+ncrit = 3.5
 iter = 5000
 
 sweep_sim_angle = 20
 sweep_sim_step = 0.5
 
 use_zero_signal = True
+
+output_directory = "output/"
+############################### Constants ###############################
+
 ############################### Convert the LabVIEW Waveform Timestamps into a usable Format ###########################
 def convert_timestamp(timestamp):
-    print("Convert timestamp " + timestamp)
     timestamp = timestamp[11:len(timestamp)].strip()
     hours = int(timestamp[0:2]) * 3600
     minutes = int(timestamp[3:5]) * 60
     seconds = float(timestamp[6:len(timestamp)].replace(",", "."))
-    print(hours + minutes + seconds)
     return float(hours + minutes + seconds)
 
 convert_timestamp_vec = np.vectorize(convert_timestamp, otypes=[float])
-
-
 ########################################################################################################################
 
 ############################### Data Input Functions ###############################
@@ -97,8 +107,17 @@ def read_sim_data(filename):
 #####################################################################################
 
 #####################################################################################
+# Calculate Reynolds Number
+def reynolds(freestream_velocity, characteristic_length, kinematic_viscosity):
+    return int((freestream_velocity * characteristic_length) / kinematic_viscosity)
+#####################################################################################
+
+
+#####################################################################################
 # Use XFoil to generate a reference polar
 def gen_xfoil_data():
+    print("Simulation Reynolds Number:")
+    re = reynolds(flow_speed, chord_length, kinematic_viscosity_air)
     xfoil_save_file = "xfoil_naca" + naca + "re" + str(re) + "ncrit" + str(ncrit) + ".dat" # File, which the polar is saved to
 
     xfoil_inp = "NACA " + naca + "\n"
@@ -148,8 +167,9 @@ def sync_merge_data(angles, forces):
 #####################################################################################
 # Convert the voltage signal from the sensor to a force signal
 def convert_voltage_to_force(u, f_kenn, c, u_speise, amplifier_sensitivity):
-    voltage = (u_speise / amplifier_sensitivity) * u
-    return voltage * u_speise * c / f_kenn
+    #voltage = (u_speise / amplifier_sensitivity) * u
+    #return voltage * u_speise * c / f_kenn
+    return u * ((f_kenn * amplifier_sensitivity) / (c * 10))
 #####################################################################################
 
 #####################################################################################
@@ -173,12 +193,12 @@ calculate_drag_coefficient_vec = np.vectorize(calculate_drag_coefficient)
 
 #####################################################################################
 # Read the angle and force data into numpy arrays
-angles = read_angle_data("Real/NACA 0018/5_10ms/serial.csv")
-forces = read_force_data("Real/NACA 0018/5_10ms/daq.csv")
+angles = read_angle_data("Real/NACA 0018/Kalibrierung7/serial.csv")
+forces = read_force_data("Real/NACA 0018/Kalibrierung7/daq.csv")
 
 if use_zero_signal:
     print("Using zero signal")
-    zero = read_force_data("Real/NACA 0018/5_10ms/zero_signal/daq.csv")
+    zero = read_force_data("Real/NACA 0018/Kalibrierung7/zero_signal/daq.csv")
 #####################################################################################
 
 #####################################################################################
@@ -190,6 +210,12 @@ np.save("save.npy", merged)
 #####################################################################################
 #Allow quick reloading of the data
 merged = np.load("save.npy", allow_pickle=True)
+#####################################################################################
+
+
+#####################################################################################
+
+re = reynolds(flow_speed, chord_length, kinematic_viscosity_air)
 #####################################################################################
 
 
@@ -217,20 +243,56 @@ if use_zero_signal:
 
 #####################################################################################
 # Calculate the zero signal on all three axes
-f1_offset = np.average(f1_zero)
-f2_offset = np.average(f2_zero)
-f3_offset = np.average(f3_zero)
+if use_zero_signal:
+    f1_offset = np.average(f1_zero)
+    f2_offset = np.average(f2_zero)
+    f3_offset = np.average(f3_zero)
 
-print("f1 offset: ", f1_offset)
-print("f2 offset: ", f2_offset)
-print("f3 offset: ", f3_offset)
+    print("f1 offset: ", f1_offset)
+    print("f2 offset: ", f2_offset)
+    print("f3 offset: ", f3_offset)
 #####################################################################################
+
+#####################################################################################
+# Read in the frame drag # https://archive.org/details/fundamentalsoffl0000muns_q0z9/page/608/mode/1up?view=theater
+"""frame_drag_force_voltage = read_force_data("Real/NACA 0018/frame_drag/daq.csv")
+frame_drag_zero_signal_voltage = read_force_data("Real/NACA 0018/frame_drag/zero_signal/daq.csv")
+
+frame_drag_force = convert_voltage_to_force_vec(frame_drag_force_voltage[:, 3], f_nom, c3, u_speise, amplifier_sensitivity)
+frame_drag_zero_signal = convert_voltage_to_force_vec(frame_drag_zero_signal_voltage[:,3], f_nom, c3, u_speise, amplifier_sensitivity)
+
+frame_drag_force_avg = np.average(frame_drag_force)
+frame_drag_zero_signal_avg = np.average(frame_drag_zero_signal)
+
+print("Frame Drag Force:", frame_drag_force_avg)
+print("Frame Drag Offset:", frame_drag_zero_signal_avg)
+
+
+
+c_d_cylinder = (5.93 / np.sqrt(re)) + 1.17
+
+flow_speed_drag_measurement = 10
+
+drag_axis = 0.5 * air_density * (flow_speed_drag_measurement ** 2) * c_d_cylinder * axis_diameter * axis_length
+
+frame_drag_force_offs = frame_drag_force_avg - frame_drag_zero_signal_avg
+frame_drag_force_offs -= drag_axis + 0.05
+
+print("Corrected Frame Drag is:", frame_drag_force_offs)
+"""
+#####################################################################################
+
+#####################################################################################
+# Apple the frame drag offset correction
+#f3 -= frame_drag_force_offs
+####################################################################################ä
 
 #####################################################################################
 # Apply the offset correction to all three channels
-f1 -= f1_offset
-f2 -= f2_offset
-f3 -= f3_offset
+if use_zero_signal:
+    f1 -= f1_offset
+    f2 -= f2_offset
+    f3 -= f3_offset
 #####################################################################################
 
 
@@ -250,9 +312,6 @@ drag_force = f3_smooth
 #####################################################################################
 # Calculate lift and drag coefficients
 lift_coefficient = calculate_lift_coefficient_vec(lift_force, air_density, flow_speed, surface_area)
-#diff = lift_coefficient.max() + lift_coefficient.min()  #
-#lift_coefficient = lift_coefficient - diff / 2          # Shift the lift curve if necessary
-
 drag_coefficient = calculate_drag_coefficient_vec(drag_force, air_density, flow_speed, surface_area)
 #####################################################################################
 
@@ -262,15 +321,40 @@ angle_smooth = scipy.ndimage.median_filter(merged[:, 1], angle_filter_length, mo
 #####################################################################################
 
 #####################################################################################
-# Read in the simulated data
+# Simulate using XFoil and read in the simulated data
 xfoil_save_file = gen_xfoil_data()
 sim_data = read_sim_data(xfoil_save_file)
+#####################################################################################
+
+
+#####################################################################################
+# Fit the drag curve
+def drag_fit(c, angle, drag):
+    fit_range = 2
+    drag_short = drag[np.where(np.abs(angle) < fit_range)]
+    angle_short = angle[np.where(np.abs(angle) < fit_range)]
+    c_d = drag_short - c
+    sim_c_d = np.interp(angle_short, sim_data[:, 0], sim_data[:, 2])
+    square_diff = (c_d - sim_c_d) ** 2
+    return np.sum(square_diff)
+
+
+minimum_fit = scipy.optimize.minimize(drag_fit, 0, (angle_smooth, drag_coefficient))
+drag_coefficient -= minimum_fit.x
 #####################################################################################
 
 #####################################################################################
 # Calculate C_L/C_D
 lift_div_drag = lift_coefficient/drag_coefficient
 sim_lift_div_drag = sim_data[:,1] / sim_data[:,2]
+#####################################################################################
+
+#####################################################################################
+# Find the zero point and correct the angle offset
+zero_index = np.argmin(np.abs(lift_coefficient))
+zero_angle = angle_smooth[zero_index]
+print("Detected zero point at", zero_angle)
+angle_smooth -= zero_angle
 #####################################################################################
 
 #####################################################################################
@@ -321,8 +405,18 @@ for ax in axs.flat:
 #####################################################################################
 
 #####################################################################################
-# Give the plots the correct title
-fig.suptitle(r"NACA 0018 at $10 \frac{m}{s}$")
-plt.show()
+# Save
 
+#np.save(output_directory + "kalib8_angle.npy", angle_smooth)
+#np.save(output_directory + "kalib8_lift.npy", lift_coefficient)
+#np.save(output_directory + "kalib8_drag.npy", drag_coefficient)
+
+#np.save(output_directory + "sim_angle.npy", sim_data[:,0])
+#np.save(output_directory + "sim_lift.npy", sim_data[:,1])
+#np.save(output_directory + "sim_drag.npy", sim_data[:,2])
+#####################################################################################
+
+#####################################################################################
+# Give the plots the correct title
+plt.show()
 #####################################################################################
